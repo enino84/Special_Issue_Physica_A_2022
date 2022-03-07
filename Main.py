@@ -338,8 +338,7 @@ class Trainer:
 N = 20;
 M = 50;
 n = 40;
-r = 3;
-sample_trai = 1;
+sample_trai = 100;
 sample_size = 10;
 Htra = np.array([2*i for i in range(0,int(n/2))], dtype=np.int32);
 Hval = np.array([2*i+1 for i in range(0,int(n/2))], dtype=np.int32);
@@ -412,7 +411,7 @@ for sam in range(0, sample_trai):
     analys.append(analys_exp);
     
     
-pickle.dump(analys, open("data_EnKFMC.pckl","wb"))    
+pickle.dump(analys, open(f'data_EnKFMC_{sample_trai}_{sample_size}.pckl',"wb"))    
 
 
 
