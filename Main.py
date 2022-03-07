@@ -13,6 +13,7 @@ import abc
 from scipy.integrate import odeint
 from sklearn.linear_model import Ridge
 import seaborn as sns
+import pickle
 
 #%% Analysis Equations
 
@@ -73,14 +74,13 @@ class AnalysisEnKFBLoc(Analysis):
     
 class AnalysisEnKFModifiedCholesky(Analysis):
 
-  def __init__(self, model, r=1, regularization_factor=0.01):
+  def __init__(self, model, r, regularization_factor):
     self.model = model;
     self.r = r;
     self.regularization_factor = regularization_factor;
 
-  def getprecisionmatrix(self,DX,r,regularization_factor=0.01):
+  def getprecisionmatrix(self,DX,r,regularization_factor):
     n,ensemble_size = DX.shape;
-    lr = Ridge(fit_intercept=False,alpha=regularization_factor);
     L = np.eye(n);
     D = np.zeros((n,n));
     D[0,0] = 1/np.var(DX[0,:]); #We are estimating D^{-1}
@@ -88,12 +88,29 @@ class AnalysisEnKFModifiedCholesky(Analysis):
       ind_prede = self.model.getpre(i,r);
       y = DX[i,:];
       X = DX[ind_prede,:].T;
-      lr_fit = lr.fit(X,y);
-      err_i = y-lr_fit.predict(X);
+      beta = self.compute_coef_SVD(X, y, self.regularization_factor);
+      err_i = y - X @ beta;
       D[i,i] = 1/np.var(err_i);
-      L[i,ind_prede] = -lr_fit.coef_;
+      L[i,ind_prede] = -beta;
     
     return L.T@(D@L);
+
+  def compute_coef_SVD(self, A,b,thr):
+        N,n = A.shape;
+        Ui,Si,Vi = np.linalg.svd(A,full_matrices=False);
+        Smax = np.max(Si);
+        Vi = Vi.T;
+        beta = np.zeros(n);
+        minn = min(N,n);
+        for i in range(0,minn):
+            #dxi = Vi[:,i]*((Ui[:,i].T @ b)/Si[i]);
+            #print('* shape '+str(beta.shape));
+            if Si[i]/Smax>thr:
+               beta += Vi[:,i]*((Ui[:,i].T @ b)/Si[i]);
+            else:
+               #if i>20: print('* Hago break y me salgo en {0} de {1}'.format(i,minn))
+               break;
+        return beta;
 
   def performassimilation(self, background, observation):
     Xb = background.getensemble();
@@ -281,13 +298,49 @@ class Background:
   def getmemberdeviations(self,scale=1):
       return scale*(self.Xb-np.outer(self.getbackgroundstate(),np.ones(self.getensemblesize())));
 
+
+#%% Training
+class Trainer:
+    def __init__(self):
+        pass;
+    
+    def train_modified_Cholesky(self, t_set, r_set, sample_size, model, background, observation_tra):
+        errora = [];
+        errorb = [];
+        
+        for r in r_set:
+            errora_par = [];
+            for rg in t_set:
+                errora_k = [];
+                for k in range(0, sample_size):
+                    
+                    analysis = AnalysisEnKFModifiedCholesky(model, r=r, regularization_factor=rg);
+                    Xak_tra = analysis.performassimilation(background,observation_tra);
+                    
+                    xma_k = analysis.getanalysisstate();
+                    traa_error = observation_tra.get_error(xma_k);
+                    vala_error = observation_val.get_error(xma_k);
+                    errora_k.append([traa_error, vala_error]);
+                
+                errora_par.append(np.array(errora_k).mean(axis=0)[1]);
+            errora.append(errora_par);
+           
+            
+        errora = np.array(errora, dtype=np.float32);
+        
+        r_opt = r_set[np.where(errora==errora.min())[0][0]];
+        t_opt = t_set[np.where(errora==errora.min())[1][0]];
+        
+        return r_opt, t_opt, errora
+        
 #%% Main program
 
 N = 20;
 M = 50;
 n = 40;
-r = 10;
-sample_size = 1000;
+r = 3;
+sample_trai = 1;
+sample_size = 10;
 Htra = np.array([2*i for i in range(0,int(n/2))], dtype=np.int32);
 Hval = np.array([2*i+1 for i in range(0,int(n/2))], dtype=np.int32);
 m_tra = Htra.size;
@@ -296,50 +349,81 @@ m_val = Hval.size;
 print(Htra)
 print(Hval)
 
-model = Lorenz96();
-background = Background(model,ensemble_size=N);
-analysis = AnalysisEnKFModifiedCholesky(model, r=r, regularization_factor=500);
+
 observation_tra = Observation(m_tra, n, std_obs=0.01, obs_operator_fixed=True, H=Htra);
 observation_val = Observation(m_val, n, std_obs=0.01, obs_operator_fixed=True, H=Hval);
+trainer = Trainer();
 
-T = np.linspace(0,1,num=2);
-
-Xb0 = background.getinitialensemble();
-xt0 = model.getinitialcondition(); 
-
-background_0 = background;
-model_0 = model;
+T = np.linspace(0,0.5,num=2);
+r_set = np.arange(1,20,2);
+t_set = np.linspace(0.01, 0.8, 10);
 
 
-Xbk = Xb0;
-xtk = xt0;
+sample = [];
 
-Xbk = background.forecaststep(Xbk, time = T);
-xtk = model.propagate(xtk,T)
+analys = [];
 
-errora_k = [];
-errorb_k = [];
-for k in range(0, sample_size):
-    observation_tra.generateobservation(xtk);
-    observation_val.generateobservation(xtk);
-    Xak_tra = analysis.performassimilation(background,observation_tra);
+for sam in range(0, sample_trai):
     
-    xmb_k = background.getbackgroundstate();
-    trab_error = observation_tra.get_error(xmb_k);
-    valb_error = observation_val.get_error(xmb_k);
-    errorb_k.append([trab_error, valb_error]);
+    model = Lorenz96();
+    background = Background(model,ensemble_size=N);
     
-    xma_k = analysis.getanalysisstate();
-    traa_error = observation_tra.get_error(xma_k);
-    vala_error = observation_val.get_error(xma_k);
-    errora_k.append([traa_error, vala_error]);
+    Xb0 = background.getinitialensemble();
+    xt0 = model.getinitialcondition(); 
     
-errora_k = np.log10(np.array(errora_k, dtype=np.float32));
-errorb_k = np.log10(np.array(errorb_k, dtype=np.float32));
+    analys_exp = [];
+        
+        
+    Xak = Xb0;
+    xtk = xt0;
+    
+    for astep in range(0, M):
+        
+        print(f'* sample {sam} out of {sample_trai}, and step {astep} out of {M}');
+        
+        Xbk = background.forecaststep(Xak, time = T);
+        xtk = model.propagate(xtk,T)
+        
+        observation_tra.generateobservation(xtk);
+        observation_val.generateobservation(xtk);
+        
+        r_opt, t_opt, errora = trainer.train_modified_Cholesky(t_set, r_set, 
+                                                               sample_size, model, 
+                                                               background, 
+                                                               observation_tra);
+        
+        analysis = AnalysisEnKFModifiedCholesky(model, r=r_opt, regularization_factor=t_opt);
+        Xak_tra = analysis.performassimilation(background,observation_tra);
+        xma_k = analysis.getanalysisstate();
+        
+        error_actual = np.linalg.norm(xtk-xma_k);
+        vala_error = observation_val.get_error(xma_k);
+        #print(f'Validation error {observation_val.get_error(xma_k)}');
+        #print(f'Actual error {error_actual}');
+        
+        analys_exp.append(error_actual);
+        
+        
+        sample.append({'Xb':Xbk, 'r':r_opt, 'thr':t_opt, 
+                       'y':observation_tra.getobservation(), 'error':errora});   
+        
+        Xak = Xak_tra;
+    
+    analys.append(analys_exp);
+    
+    
+pickle.dump(analys, open("data_EnKFMC.pckl","wb"))    
 
 
-sns.regplot(x=errorb_k[:,0], y=errorb_k[:,1], color='blue')
-sns.regplot(x=errora_k[:,0], y=errora_k[:,1], color='red')
+
+plt.figure(figsize=(10,10))
+sns.heatmap(errora, xticklabels=np.round(t_set,2), 
+            yticklabels=r_set, annot=True, cmap='viridis')
+plt.xlabel('$\\sigma_{{\\rm thr}}$')
+plt.ylabel('$\\delta$')
+
+#sns.regplot(x=errorb_k[:,0], y=errorb_k[:,1], color='blue')
+#sns.regplot(x=errora_k[:,0], y=errora_k[:,1], color='red')
 
 
 
